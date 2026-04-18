@@ -1,60 +1,77 @@
-# Toy: x/e/v-pred on Spiral (v-loss)
+﻿# Toy: x/e/v-pred on 2D Data
 
-This toy project compares `x-pred`, `e-pred`, and `v-pred` under the same `v-loss` training objective.
+This toy project compares `x-pred`, `e-pred`, and `v-pred` under the same `v-loss`.
 
 ## What it does
 
-1. Samples a 2D spiral with 2 turns (`--num_points`, default 1024), coordinates in `[-1, 1]`.
-   Sampling is approximately uniform in XY (arc-length based), and Gaussian noise is added (`--noise_std`), so points are not strictly on the spiral.
-2. Saves the sampled plane plot (`spiral_2d.png`).
-3. Builds a random fixed projection matrix `P` with orthonormal columns (`P^T P = I`).
-4. Embeds points into high-dimensional space as `Px`.
-5. Trains a 5-layer ReLU MLP (width 256, plus input/output linear adapters) for each pred type (`x/e/v`), always with `v-loss`.
-6. Samples in high-dim, maps generated points back to 2D via `P^T y`, and saves plots.
+1. Generates 2D data (`spiral` or `line`) with Gaussian noise.
+2. Projects 2D points to high-dim space with a fixed matrix `P` (`X = P x`).
+3. Trains a ReLU MLP denoiser with `v-loss`.
+4. Samples in high-dim and maps back to 2D (`P^T y`) for visualization.
+5. Supports grid comparison:
+   - rows: `high_dim`
+   - columns: pred/noise configurations
 
-## `k` / `h` options in `--pred_types`
+## Key options
 
-`--pred_types` supports not only `x,e,v`, but also `k=<float>` and `h=<float>`.
+- `--pred_types`: comma list from `x,e,v`
+- `--high_dim`: comma list, e.g. `2,4,8`
+- `--noise_scale`: `auto`, numeric, numeric list, `e`, `var`, or `ep`
+  - `auto`: `v` uses `e`-estimated noise scale, `x/e` use `1.0`
+  - `e`: noise_scale = sqrt(E / high_dim), where E = mean(||X||^2)
+  - `var`: noise_scale = sqrt(var_total / high_dim), where var_total = sum of per-dim variances
+  - `ep`: noise_scale = sqrt(E^(1 + (r - d)/2) / ((exp(-d) + 1) * d))
+    - `r`: `TwoNN` 在当前高维数据 `X` 上估计的维度
+    - `d`: high_dim
+- `--width`: MLP width (default `256`)
+- `--shape`: `spiral` or `line`
 
-- `k=<float>`:
-  - Treated as `v-pred` with an extra subtraction term.
-  - Formula:
-    - `f_t = max(0, k*t + 1)`
-    - `v <- v - (z/(1-t))*f_t`
+## Visualization notes
 
-- `h=<float>`:
-  - Also treated as `v-pred` with a different decay-style subtraction term.
-  - Formula:
-    - `f_t = exp(ln(0.01) * t / h)`
-    - `v <- v - (z/(1-t))*f_t`
-  - `h` must be non-zero.
+- Left-most column is `real`.
+- Left annotation column shows `high_dim` values.
+- In `auto` mode:
+  - `x-pred` column title adds `(sigma=1.0)`
+  - `v-pred` column title adds `(SRN=1.0)`
+- If `e-pred` uses manual numeric `noise_scale`, title shows `(noise_scale=...)`.
 
-Difference:
-- `k` gives a linear gate (`max(0, k*t+1)`), often more abrupt depending on `k`.
-- `h` gives an exponential schedule, typically smoother over time.
+## Combination rule
 
-## Run
+The script checks combination-space dimensionality over:
+- `high_dim`
+- `pred_types`
+- `noise_scale`
+
+If dimensionality is greater than 3, it raises an error.
+
+## Default output directory
+
+If `--out_dir` is empty, default is:
+
+`./out/{pred_types}_{high_dim}{optional_noise_suffix}{optional_line_suffix}{optional_width_suffix}`
+
+## Example
 
 ```bash
-python toy/train_toy_spiral.py \
+python toy/train.py \
+  --shape spiral \
   --num_points 1024 \
-  --noise_std 0.02 \
-  --high_dim 64 \
-  --pred_types x,e,v,k=0,h=0.3 \
+  --high_dim 2,4,8 \
+  --pred_types x,v \
+  --noise_scale auto \
+  --width 256 \
   --epochs 4000 \
   --batch_size 256 \
   --sample_steps 100 \
-  --sample_method heun \
-  --out_dir toy/out
+  --sample_method heun
 ```
 
 ## Outputs
 
 - `spiral_2d.png`
 - `spiral_recovered_from_highdim.png`
-- `generated_x_plane.png`
-- `generated_e_plane.png`
-- `generated_v_plane.png`
-- `loss_curves.png`
 - `compare_real_vs_generated.png`
+- `loss_curves.png` (when `epochs <= 200`)
+- `loss_curves_first200.png` and `loss_curves_last10.png` (when `epochs > 200`)
 - `run_meta.pt`
+
