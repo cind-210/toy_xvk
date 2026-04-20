@@ -50,6 +50,8 @@ def train_one_pred_type(
         t = sample_t(batch_size, cfg, device).view(-1, 1)
         e = torch.randn_like(x) * cfg.noise_scale
 
+        # Interpolate from pure noise to data and always optimize in v-space,
+        # regardless of whether the network predicts x, e, or v directly.
         z = t * x + (1.0 - t) * e
         v_target = (x - z) / (1.0 - t).clamp_min(cfg.t_eps)
         pred = model(z, t.flatten())
@@ -92,6 +94,7 @@ def sample_from_model(
             v = v_of(z, t)
             z = z + dt * v
         elif cfg.sample_method == "heun":
+            # Heun uses an Euler proposal plus a corrected slope estimate.
             v_t = v_of(z, t)
             z_euler = z + dt * v_t
             v_t_next = v_of(z_euler, t_next)

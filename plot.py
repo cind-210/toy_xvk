@@ -85,13 +85,14 @@ def plot_compare_grid(
     fig = plt.figure(figsize=(4.8 * cols, 4.0 * rows))
     real_np = real_xy.detach().cpu().numpy()
     first_col_axes: List[object] = []
+    top_row_axes: List[object] = []
 
     for r_idx, hd in enumerate(row_high_dims):
         ax = plt.subplot(rows, cols, r_idx * cols + 1)
         first_col_axes.append(ax)
         ax.scatter(real_np[:, 0], real_np[:, 1], s=8, alpha=POINT_ALPHA)
         if r_idx == 0:
-            ax.set_title("real", fontsize=TOP_ANNOT_FONTSIZE)
+            top_row_axes.append(ax)
         ax.set_xlim(-1.1, 1.1)
         ax.set_ylim(-1.1, 1.1)
         ax.set_aspect("equal", adjustable="box")
@@ -102,37 +103,41 @@ def plot_compare_grid(
             g = grid_xy[(hd, ck)].detach().cpu().numpy()
             ax.scatter(g[:, 0], g[:, 1], s=8, alpha=POINT_ALPHA)
             if r_idx == 0:
-                ax.set_title(col_titles.get(ck, ck), fontsize=TOP_ANNOT_FONTSIZE)
-                ns_label = col_ns_labels.get(ck, "")
-                if ns_label != "":
-                    ax.text(
-                        0.5,
-                        1.005,
-                        ns_label,
-                        transform=ax.transAxes,
-                        ha="center",
-                        va="bottom",
-                        fontsize=max(8, int(TOP_ANNOT_FONTSIZE * 0.5)),
-                    )
+                top_row_axes.append(ax)
             ax.set_xlim(-1.1, 1.1)
             ax.set_ylim(-1.1, 1.1)
             ax.set_aspect("equal", adjustable="box")
             ax.grid(alpha=0.25)
 
-    plt.tight_layout(rect=[0.12, 0.0, 1.0, 1.0])
+    plt.tight_layout(rect=[0.16, 0.0, 1.0, 0.88])
+
+    # Add titles after tight_layout so they align with the final subplot positions.
+    for ax, title in zip(top_row_axes, ["real"] + [col_titles.get(ck, ck) for ck in col_keys]):
+        pos = ax.get_position()
+        x_center = 0.5 * (pos.x0 + pos.x1)
+        y_title = min(0.992, pos.y1 + 0.045)
+        plt.figtext(x_center, y_title, title, ha="center", va="bottom", fontsize=TOP_ANNOT_FONTSIZE)
+
+    for ax, ck in zip(top_row_axes[1:], col_keys):
+        ns_label = col_ns_labels.get(ck, "")
+        if ns_label == "":
+            continue
+        pos = ax.get_position()
+        x_center = 0.5 * (pos.x0 + pos.x1)
+        y_ns = min(0.972, pos.y1 + 0.018)
+        plt.figtext(
+            x_center,
+            y_ns,
+            ns_label,
+            ha="center",
+            va="bottom",
+            fontsize=max(8, int(TOP_ANNOT_FONTSIZE * 0.5)),
+        )
 
     if len(first_col_axes) > 0:
         left_x0 = first_col_axes[0].get_position().x0
-        x_col = max(0.02, left_x0 - 0.08)
-        # Align header vertically with actual rendered top titles.
-        fig.canvas.draw()
-        renderer = fig.canvas.get_renderer()
-        title_artist = first_col_axes[0].title
-        if title_artist.get_text().strip() != "":
-            bbox = title_artist.get_window_extent(renderer=renderer)
-            y_top = fig.transFigure.inverted().transform((0.0, 0.5 * (bbox.y0 + bbox.y1)))[1]
-        else:
-            y_top = min(0.995, first_col_axes[0].get_position().y1 + 0.02)
+        x_col = max(0.015, left_x0 - 0.11)
+        y_top = min(0.992, first_col_axes[0].get_position().y1 + 0.045)
         plt.figtext(x_col, y_top, "high_dim", ha="center", va="top", fontsize=TOP_ANNOT_FONTSIZE)
         for ax, hd in zip(first_col_axes, row_high_dims):
             pos = ax.get_position()

@@ -1,5 +1,4 @@
 import argparse
-import math
 import os
 from typing import Dict, List, Tuple
 
@@ -24,8 +23,21 @@ from utils import (
     set_seed,
 )
 
+BEST_NOISE_SCALE_BY_HIGH_DIM = {
+    2: 1.0 / 2.0,
+    4: 34.0 / 128.0,
+    8: 7.0 / 128.0,
+    16: 3.0 / 128.0,
+    32: 11.0 / 512.0,
+    64: 5.0 / 256.0,
+    128: 3.0 / 128.0,
+    256: 6.0 / 256.0,
+    512: 12.0 / 512.0,
+    1024: 20.0 / 1024.0,
+}
 
-def main() -> None:
+
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser("Toy x/e/v-pred on 2D spiral with random orthonormal projection")
     parser.add_argument("--shape", type=str, default="spiral", choices=["spiral", "line"], help="2D source shape.")
     parser.add_argument("--num_points", type=int, default=1024, help="Number of spiral points")
@@ -41,12 +53,6 @@ def main() -> None:
     parser.add_argument("--noise_std", type=float, default=0.02, help="Std of Gaussian noise added to 2D points")
     parser.add_argument("--curve_res", type=int, default=20000, help="Dense curve resolution for arc-length sampling")
     parser.add_argument("--pred_types", type=str, default="x,e,v", help="Comma-separated specs: x,e,v")
-    parser.add_argument(
-        "--pred_type",
-        type=str,
-        default="",
-        help="Alias of --pred_types (single string). If set, it overrides --pred_types.",
-    )
     parser.add_argument("--epochs", type=int, default=4000)
     parser.add_argument("--batch_size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
@@ -56,57 +62,40 @@ def main() -> None:
         "--noise_scale",
         type=str,
         default="auto",
-        help="Noise-scale mode(s): float, comma list, auto, e, var, ep. Examples: auto | 1.0 | 0.2,0.3 | e | var | ep",
+        help="Noise-scale mode(s): float, comma list, auto, best, e, var. Examples: auto | best | 1.0 | 0.2,0.3 | e | var",
     )
     parser.add_argument("--sample_steps", type=int, default=100)
     parser.add_argument("--sample_method", type=str, default="heun", choices=["euler", "heun"])
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--device", type=str, default="cuda")
     parser.add_argument("--out_dir", type=str, default="", help="Output dir. Empty means auto naming.")
-    args = parser.parse_args()
-    set_seed(args.seed)
+    return parser
 
-    if args.device == "cuda" and not torch.cuda.is_available():
+
+def resolve_device(device_name: str) -> torch.device:
+    if device_name == "cuda" and not torch.cuda.is_available():
         print("CUDA not available, falling back to CPU.")
-        args.device = "cpu"
-    device = torch.device(args.device)
+        device_name = "cpu"
+    return torch.device(device_name)
 
-    if args.pred_type.strip() != "":
-        args.pred_types = args.pred_type
-    pred_specs = parse_pred_specs(args.pred_types)
-    noise_modes = parse_noise_scale_modes(args.noise_scale)
-    high_dims = parse_high_dims(args.high_dim)
-    needs_ep = any(str(m["mode"]) == "ep" for m in noise_modes)
-    tnn_estimator = None
-    if needs_ep:
-        try:
-            from skdim.id import TwoNN
-        except Exception as exc:
-            raise RuntimeError(
-                "--noise_scale ep requires scikit-dimension. Please install package 'scikit-dimension'."
-            ) from exc
-        tnn_estimator = TwoNN()
 
-    combo_dims = int(len(high_dims) > 1) + int(len(pred_specs) > 1) + int(len(noise_modes) > 1)
-    if combo_dims > 3:
-        raise ValueError("Combination dimensionality > 3 is not supported for current visualization.")
-
-    if args.out_dir.strip() == "":
-        args.out_dir = build_default_out_dir(args.pred_types, high_dims, args.shape, noise_modes, args.width)
-        args.out_dir = ensure_unique_default_out_dir(args.out_dir)
-    ensure_dir(args.out_dir)
-
+def make_source_points(args: argparse.Namespace, out_dir: str) -> torch.Tensor:
     if args.shape == "line":
         x2 = make_line_points(args.num_points, args.noise_std)
         title = f"2D Line noisy ({args.num_points} pts, y=0.5, x in [-0.5,0.5], noise={args.noise_std})"
     else:
         x2 = make_spiral_points(args.num_points, args.turns, args.noise_std, args.curve_res)
         title = f"2D Spiral noisy ({args.num_points} pts, turns={args.turns}, noise={args.noise_std})"
-    save_scatter(x2, title, os.path.join(args.out_dir, "spiral_2d.png"))
-    print(f"Saved: {os.path.join(args.out_dir, 'spiral_2d.png')}")
+    out_path = os.path.join(out_dir, "spiral_2d.png")
+    save_scatter(x2, title, out_path)
+    print(f"Saved: {out_path}")
+    return x2
 
-    x2_dev = x2.to(device)
 
+def build_col_templates(
+    noise_modes: List[Dict[str, object]],
+    pred_specs: List[Dict[str, str]],
+) -> List[Dict[str, object]]:
     col_templates: List[Dict[str, object]] = []
     col_idx = 0
     for nm in noise_modes:
@@ -123,125 +112,191 @@ def main() -> None:
                     "noise_value": ns_val,
                 }
             )
+    return col_templates
 
-    grid_xy: Dict[Tuple[int, str], torch.Tensor] = {}
-    all_losses: Dict[str, List[float]] = {}
-    run_meta_rows: List[Dict[str, object]] = []
-    ptp_err_by_hd: Dict[int, float] = {}
-    sources: List[Dict[str, object]] = []
 
+def build_col_labels(col_templates: List[Dict[str, object]]) -> Tuple[Dict[str, str], Dict[str, str]]:
     col_titles: Dict[str, str] = {}
     col_ns_labels: Dict[str, str] = {}
-    for t in col_templates:
-        cid = str(t["col_id"])
-        pred_type = str(t["pred_type"])
-        noise_mode = str(t["noise_mode"])
-        noise_value = t["noise_value"]
-        base = f"{pred_type}-pred"
-        col_titles[cid] = base
+    for template in col_templates:
+        cid = str(template["col_id"])
+        pred_type = str(template["pred_type"])
+        noise_mode = str(template["noise_mode"])
+        noise_value = template["noise_value"]
+        col_titles[cid] = f"{pred_type}-pred"
         if noise_mode == "auto":
-            if pred_type == "v":
-                col_ns_labels[cid] = "ns=e(auto)"
-            else:
-                col_ns_labels[cid] = "ns=1.0"
+            col_ns_labels[cid] = "ns=var(auto)" if pred_type == "v" else "ns=1.0(auto)"
+        elif noise_mode == "best":
+            col_ns_labels[cid] = "ns=best" if pred_type == "v" else "ns=1.0(best)"
         elif noise_mode == "fixed" and noise_value is not None:
             col_ns_labels[cid] = f"ns={float(noise_value):g}"
-        elif noise_mode in ("e", "var", "ep"):
+        elif noise_mode in ("e", "var"):
             col_ns_labels[cid] = f"ns={noise_mode}"
         else:
             col_ns_labels[cid] = ""
+    return col_titles, col_ns_labels
 
-    # Prepare shared data source (P and projected data) once per high_dim.
-    for hd in high_dims:
-        if args.projection_mode == "identity":
-            if hd != 2:
-                raise ValueError("--projection_mode identity only supports high_dim=2.")
-            p = make_identity_projection_matrix(device=device)
-        else:
-            p = make_projection_matrix(hd, device=device)
-        ptp = (p.transpose(0, 1) @ p).detach().cpu().numpy()
-        ptp_err = float(np.abs(ptp - np.eye(2)).max())
-        ptp_err_by_hd[int(hd)] = ptp_err
-        print(
-            f"[high_dim={hd}] Projection matrix P built. mode={args.projection_mode}, "
-            f"shape={tuple(p.shape)}, max|P^T P - I|={ptp_err:.6e}"
+
+def validate_best_mode_support(
+    noise_modes: List[Dict[str, object]],
+    pred_specs: List[Dict[str, str]],
+    high_dims: List[int],
+) -> None:
+    uses_best = any(str(mode["mode"]) == "best" for mode in noise_modes)
+    has_v_pred = any(str(spec["pred_type"]) == "v" for spec in pred_specs)
+    if not (uses_best and has_v_pred):
+        return
+    missing_high_dims = [high_dim for high_dim in high_dims if high_dim not in BEST_NOISE_SCALE_BY_HIGH_DIM]
+    if len(missing_high_dims) > 0:
+        raise ValueError(
+            "--noise_scale best for v-pred is only available for high_dim values in best_ns.md. "
+            f"Unsupported values: {missing_high_dims}"
         )
 
-        x_hd = x2_dev @ p.transpose(0, 1)
-        x_for_stats = x_hd.detach().cpu().numpy().astype(np.float64, copy=False)
-        e_energy = float(np.mean(np.linalg.norm(x_for_stats, axis=1) ** 2))
-        var_total = float(np.var(x_for_stats, axis=0, ddof=0).sum())
-        r_dim = float(tnn_estimator.fit(x_for_stats).dimension_) if tnn_estimator is not None else float("nan")
-        d_dim = float(hd)
-        e_noise_scale = float(math.sqrt(e_energy / float(hd)))
-        var_noise_scale = float(math.sqrt(var_total / float(hd)))
-        if tnn_estimator is not None:
-            print(f"[high_dim={hd}] TwoNN intrinsic dim r={r_dim:.6g}")
 
-        ep_exp = 1.0 + (r_dim - d_dim) / 2.0
-        e_safe = max(e_energy, 1e-12)
-        ep_num = math.pow(e_safe, ep_exp)
-        ep_denom = (math.exp(-d_dim) + 1.0) * d_dim
-        ep_noise_scale = float(math.sqrt(ep_num / ep_denom))
+def build_projection(high_dim: int, projection_mode: str, device: torch.device) -> torch.Tensor:
+    if projection_mode == "identity":
+        if high_dim != 2:
+            raise ValueError("--projection_mode identity only supports high_dim=2.")
+        return make_identity_projection_matrix(device=device)
+    return make_projection_matrix(high_dim, device=device)
 
+
+def build_sources(
+    high_dims: List[int],
+    projection_mode: str,
+    x2_dev: torch.Tensor,
+    device: torch.device,
+) -> Tuple[List[Dict[str, object]], Dict[int, float]]:
+    sources: List[Dict[str, object]] = []
+    ptp_err_by_hd: Dict[int, float] = {}
+
+    for high_dim in high_dims:
+        projection = build_projection(high_dim, projection_mode, device)
+        ptp = (projection.transpose(0, 1) @ projection).detach().cpu().numpy()
+        ptp_err = float(np.abs(ptp - np.eye(2)).max())
+        ptp_err_by_hd[int(high_dim)] = ptp_err
+        print(
+            f"[high_dim={high_dim}] Projection matrix P built. mode={projection_mode}, "
+            f"shape={tuple(projection.shape)}, max|P^T P - I|={ptp_err:.6e}"
+        )
+
+        x_hd = x2_dev @ projection.transpose(0, 1)
+        x_stats = x_hd.detach().cpu().numpy().astype(np.float64, copy=False)
+        e_energy = float(np.mean(np.linalg.norm(x_stats, axis=1) ** 2))
+        var_total = float(np.var(x_stats, axis=0, ddof=0).sum())
         sources.append(
             {
-                "high_dim": int(hd),
-                "P": p,
+                "high_dim": int(high_dim),
+                "P": projection,
                 "x_hd": x_hd,
                 "E": e_energy,
                 "var": var_total,
-                "r_dim": r_dim,
-                "e_ns": e_noise_scale,
-                "var_ns": var_noise_scale,
-                "ep_ns": ep_noise_scale,
+                "e_ns": float(np.sqrt(e_energy / float(high_dim))),
+                "var_ns": float(np.sqrt(var_total / float(high_dim))),
             }
         )
+    return sources, ptp_err_by_hd
 
-    if len(sources) > 0:
-        first = sources[0]
-        x2_recon = first["x_hd"] @ first["P"]  # type: ignore[operator]
-        save_scatter(x2_recon, "P^T(Px) on plane", os.path.join(args.out_dir, "spiral_recovered_from_highdim.png"))
-        print(f"Saved: {os.path.join(args.out_dir, 'spiral_recovered_from_highdim.png')}")
 
-    # Reuse prepared source for each configuration.
+def resolve_run_noise(
+    pred_type: str,
+    noise_mode: str,
+    noise_value: object,
+    high_dim: int,
+    e_energy: float,
+    var_total: float,
+    e_noise_scale: float,
+    var_noise_scale: float,
+) -> Tuple[float, str]:
+    if noise_mode == "auto":
+        if pred_type == "v":
+            return var_noise_scale, f"ns={var_noise_scale:.4g},var={var_total:.4g}"
+        return 1.0, "ns=1(auto)"
+    if noise_mode == "best":
+        if pred_type == "v":
+            if high_dim not in BEST_NOISE_SCALE_BY_HIGH_DIM:
+                raise ValueError(
+                    f"--noise_scale best has no hard-coded entry for high_dim={high_dim}. "
+                    "Please add it to the best_ns.md-derived table first."
+                )
+            best_noise_scale = float(BEST_NOISE_SCALE_BY_HIGH_DIM[high_dim])
+            return best_noise_scale, "ns=best"
+        return 1.0, "ns=1(best)"
+    if noise_mode == "e":
+        return e_noise_scale, f"ns={e_noise_scale:.4g},E={e_energy:.4g}"
+    if noise_mode == "var":
+        return var_noise_scale, f"ns={var_noise_scale:.4g},var={var_total:.4g}"
+    assert noise_value is not None
+    run_noise_scale = float(noise_value)
+    return run_noise_scale, f"ns={run_noise_scale:g}"
+
+
+def save_recovered_projection_preview(sources: List[Dict[str, object]], out_dir: str) -> None:
+    if len(sources) == 0:
+        return
+    first = sources[0]
+    x2_recon = first["x_hd"] @ first["P"]  # type: ignore[operator]
+    out_path = os.path.join(out_dir, "spiral_recovered_from_highdim.png")
+    save_scatter(x2_recon, "P^T(Px) on plane", out_path)
+    print(f"Saved: {out_path}")
+
+
+def main() -> None:
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    set_seed(args.seed)
+    device = resolve_device(args.device)
+
+    pred_specs = parse_pred_specs(args.pred_types)
+    noise_modes = parse_noise_scale_modes(args.noise_scale)
+    high_dims = parse_high_dims(args.high_dim)
+    validate_best_mode_support(noise_modes, pred_specs, high_dims)
+
+    combo_dims = int(len(high_dims) > 1) + int(len(pred_specs) > 1) + int(len(noise_modes) > 1)
+    if combo_dims > 3:
+        raise ValueError("Combination dimensionality > 3 is not supported for current visualization.")
+
+    if args.out_dir.strip() == "":
+        args.out_dir = build_default_out_dir(args.pred_types, high_dims, args.shape, noise_modes, args.width)
+        args.out_dir = ensure_unique_default_out_dir(args.out_dir)
+    ensure_dir(args.out_dir)
+
+    x2 = make_source_points(args, args.out_dir)
+    x2_dev = x2.to(device)
+    col_templates = build_col_templates(noise_modes, pred_specs)
+    grid_xy: Dict[Tuple[int, str], torch.Tensor] = {}
+    all_losses: Dict[str, List[float]] = {}
+    run_meta_rows: List[Dict[str, object]] = []
+    col_titles, col_ns_labels = build_col_labels(col_templates)
+    sources, ptp_err_by_hd = build_sources(high_dims, args.projection_mode, x2_dev, device)
+    save_recovered_projection_preview(sources, args.out_dir)
+
+    # Projection and data stats only depend on high_dim, so we reuse them across runs.
     for src in sources:
         hd = int(src["high_dim"])
         p = src["P"]  # type: ignore[assignment]
         x_hd = src["x_hd"]  # type: ignore[assignment]
         e_energy = float(src["E"])
         var_total = float(src["var"])
-        r_dim = float(src["r_dim"])
         e_noise_scale = float(src["e_ns"])
         var_noise_scale = float(src["var_ns"])
-        ep_noise_scale = float(src["ep_ns"])
 
         for t in col_templates:
             col_id = str(t["col_id"])
             pred_type = str(t["pred_type"])
             noise_mode = str(t["noise_mode"])
             noise_value = t["noise_value"]  # type: ignore[assignment]
-
-            if noise_mode == "auto":
-                if pred_type == "v":
-                    run_noise_scale = e_noise_scale
-                    noise_label = f"ns={run_noise_scale:.4g},E={e_energy:.4g}"
-                else:
-                    run_noise_scale = 1.0
-                    noise_label = "ns=1"
-            elif noise_mode == "e":
-                run_noise_scale = e_noise_scale
-                noise_label = f"ns={run_noise_scale:.4g},E={e_energy:.4g}"
-            elif noise_mode == "var":
-                run_noise_scale = var_noise_scale
-                noise_label = f"ns={run_noise_scale:.4g},var={var_total:.4g}"
-            elif noise_mode == "ep":
-                run_noise_scale = ep_noise_scale
-                noise_label = f"ns={run_noise_scale:.4g},ep(r={r_dim:.0f},d={hd})"
-            else:
-                assert noise_value is not None
-                run_noise_scale = float(noise_value)
-                noise_label = f"ns={run_noise_scale:g}"
+            run_noise_scale, noise_label = resolve_run_noise(
+                pred_type=pred_type,
+                noise_mode=noise_mode,
+                noise_value=noise_value,
+                high_dim=hd,
+                e_energy=e_energy,
+                var_total=var_total,
+                e_noise_scale=e_noise_scale,
+                var_noise_scale=var_noise_scale,
+            )
 
             run_name = f"{pred_type},{noise_label},hd={hd}"
             cfg_run = DiffusionCfg(
@@ -285,7 +340,6 @@ def main() -> None:
                     "noise_scale": float(run_noise_scale),
                     "E": float(e_energy),
                     "var": float(var_total),
-                    "r_dim": float(r_dim),
                     "final_loss": float(trained["losses"][-1]),  # type: ignore[index]
                 }
             )

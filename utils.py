@@ -48,14 +48,14 @@ def parse_noise_scale_modes(spec: str) -> List[Dict[str, Optional[float]]]:
         if tok == "auto":
             modes.append({"mode": "auto", "value": None})
             continue
+        if tok == "best":
+            modes.append({"mode": "best", "value": None})
+            continue
         if tok == "e":
             modes.append({"mode": "e", "value": None})
             continue
         if tok == "var":
             modes.append({"mode": "var", "value": None})
-            continue
-        if tok == "ep":
-            modes.append({"mode": "ep", "value": None})
             continue
         val = float(tok)
         if val < 0.0:
@@ -91,13 +91,15 @@ def build_default_out_dir(
 ) -> str:
     pred_tag = _sanitize_alnum(pred_types_spec.lower())
     has_numeric_noise = any(str(m["mode"]) == "fixed" for m in noise_modes)
-    letter_modes = {"e", "var", "ep"}
+    letter_modes = {"best", "e", "var"}
     ordered_letters: List[str] = []
     for m in noise_modes:
         mode = str(m["mode"])
         if mode in letter_modes and mode not in ordered_letters:
             ordered_letters.append(mode)
     noise_suffix = ""
+    # Keep the default folder name compact when fixed numeric scales are used,
+    # because those values can vary a lot across sweeps.
     if (not has_numeric_noise) and len(ordered_letters) > 0:
         noise_suffix = "_" + "".join(ordered_letters)
     hd_tag = str(high_dims[0]) if len(high_dims) == 1 else "".join(str(x) for x in high_dims)

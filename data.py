@@ -9,6 +9,8 @@ def make_spiral_points(
     noise_std: float = 0.02,
     curve_res: int = 20000,
 ) -> torch.Tensor:
+    # Sample a dense spiral first, then resample by arc length so points are
+    # distributed more evenly along the curve instead of clustering near the center.
     t_dense = torch.linspace(0.0, turns * 2.0 * math.pi, curve_res)
     r_dense = t_dense / (turns * 2.0 * math.pi)
     x_dense = r_dense * torch.cos(t_dense)
@@ -46,6 +48,7 @@ def make_line_points(num_points: int, noise_std: float = 0.02) -> torch.Tensor:
 
 def make_projection_matrix(high_dim: int, device: torch.device) -> torch.Tensor:
     raw = torch.randn(high_dim, 2, device=device)
+    # QR gives orthonormal columns, so P^T P stays close to I_2.
     q, _ = torch.linalg.qr(raw, mode="reduced")
     p = q[:, :2].contiguous()
     return p

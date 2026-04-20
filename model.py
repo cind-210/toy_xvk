@@ -19,10 +19,9 @@ class ToyMLP(nn.Module):
         self.out_adapter = nn.Linear(width, data_dim)
 
     def forward(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        # Concatenate time as a scalar conditioning feature for each sample.
         t_col = t.view(-1, 1).to(dtype=z.dtype)
         h = torch.cat([z, t_col], dim=1)
-        h = F.relu(self.layers[0](h), inplace=False)
-        h = F.relu(self.layers[1](h), inplace=False)
-        h = F.relu(self.layers[2](h), inplace=False)
-        h = F.relu(self.layers[3](h), inplace=False)
+        for layer in self.layers:
+            h = F.relu(layer(h), inplace=False)
         return self.out_adapter(h)
