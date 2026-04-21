@@ -3,7 +3,7 @@
 This project is a small experimental framework built around a 5-layer ReLU MLP for comparing `x-pred`, `e-pred`, and `v-pred` under the same `v-loss` training objective.
 
 ## Findings
-![compare_xve_pred_in_best_ns](assets/compare_real_vs_generated.png)
+![compare xve in there best noise scale setting](assets/compare_best.png)
 For 2D spiral-distributed data embedded in a high-dimensional space:
 + `x-pred` fits well while simply keeping **`noise_scale=1.0`**. 
 + `v-pred` requires more careful `noise_scale` design; the exact best formula is still unknown, but keeping **`SNR=1.0`** yields a `noise_scale` in the same order of magnitude as the best one. Its best performance is slightly worse than `x-pred`, but it can still fit the data well. We also provide a reference list in [best_ns.md](best_ns.md).
@@ -23,6 +23,24 @@ python train.py \
   --noise_std 0.01 \
   --noise_scale best
 ```
+
+If **`noise_scale=1.0`** is used for all dimensions, only `x-pred` continues to work well across the full range.
+
+![compare xve when noise scale=1.0](assets/compare_ns1.png)
+
+```bash
+python train.py \
+  --num_points 4096 \
+  --high_dim 2,16,512 \
+  --pred_types x,v,e \
+  --epochs 2000 \
+  --batch_size 1024 \
+  --sample_steps 100 \
+  --sample_method heun \
+  --noise_std 0.01 \
+  --noise_scale 1.0
+```
+
 
 ## Pipeline
 
